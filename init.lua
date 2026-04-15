@@ -118,6 +118,39 @@ vim.schedule(function()
   vim.o.clipboard = 'unnamedplus'
 end)
 
+-- Fix "waiting for osc52 response from terminal" message
+-- https://github.com/neovim/neovim/issues/28611
+-- if vim.env.SSH_TTY ~= nil then
+-- Set up clipboard for ssh
+local function my_paste(_)
+  return function(_)
+    local content = vim.fn.getreg '"'
+    return vim.split(content, '\n')
+  end
+end
+
+vim.opt.clipboard = 'unnamedplus'
+
+-- Enable OSC52 clipboard over SSH (remote -> local clipboard via terminal)S
+vim.g.clipboard = {
+  name = 'OSC 52',
+  copy = {
+    ['+'] = require('vim.ui.clipboard.osc52').copy '+',
+    ['*'] = require('vim.ui.clipboard.osc52').copy '*',
+  },
+  paste = {
+    -- use your local fallback paste
+    ['+'] = my_paste(),
+    ['*'] = my_paste(),
+  },
+  cache_enabled = 0,
+}
+
+-- reduce expensive redraw work in terminals
+vim.opt.lazyredraw = true
+vim.opt.redrawtime = 1500
+vim.opt.synmaxcol = 200
+
 -- Enable break indent
 vim.o.breakindent = true
 
@@ -476,6 +509,41 @@ require('lazy').setup({
     },
   },
   {
+    'github/copilot.vim',
+    event = 'InsertEnter',
+  },
+  {
+    'olimorris/codecompanion.nvim',
+    dependencies = {
+      'nvim-lua/plenary.nvim',
+      'nvim-treesitter/nvim-treesitter',
+    },
+    display = {
+      diff = {
+        enabled = false,
+      },
+    },
+
+    opts = {
+      -- NOTE: The log_level is in `opts.opts`
+      -- copilot_acp is a built-in ACP adapter since codecompanion v19.5.0
+      opts = {
+        log_level = 'ERROR',
+      },
+      strategies = {
+        chat = {
+          adapter = 'copilot_acp',
+        },
+        inline = {
+          adapter = 'copilot_acp',
+        },
+        cmd = {
+          adapter = 'copilot_acp',
+        },
+      },
+    },
+  },
+  {
     -- Main LSP Configuration
     'neovim/nvim-lspconfig',
     dependencies = {
@@ -572,6 +640,8 @@ require('lazy').setup({
           --  the definition of its *type*, not where it was *defined*.
           map('grt', require('telescope.builtin').lsp_type_definitions, '[G]oto [T]ype Definition')
 
+          map('K', vim.lsp.buf.hover, 'Hover')
+
           -- This function resolves a difference between neovim nightly (version 0.11) and stable (version 0.10)
           ---@param client vim.lsp.Client
           ---@param method vim.lsp.protocol.Method
@@ -623,6 +693,18 @@ require('lazy').setup({
               vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled { bufnr = event.buf })
             end, '[T]oggle Inlay [H]ints')
           end
+          -- Prefer Pyright for hover/docs; keep Ruff focused on lint/fix/format
+          if client and client.name == 'ruff' then
+            client.server_capabilities.hoverProvider = false
+            -- Ruff will provide formatting; confirm it’s enabled
+            client.server_capabilities.documentFormattingProvider = true
+          end
+
+          -- Pyright doesn’t format, but be explicit about who formats Python:
+          if client and client.name == 'pyright' then
+            client.server_capabilities.documentFormattingProvider = false
+            client.server_capabilities.documentRangeFormattingProvider = false
+          end
         end,
       })
 
@@ -655,12 +737,6 @@ require('lazy').setup({
         },
       }
 
-      -- LSP servers and clients are able to communicate to each other what features they support.
-      --  By default, Neovim doesn't support everything that is in the LSP specification.
-      --  When you add blink.cmp, luasnip, etc. Neovim now has *more* capabilities.
-      --  So, we create new capabilities with blink.cmp, and then broadcast that to the servers.
-      local capabilities = require('blink.cmp').get_lsp_capabilities()
-
       -- Enable the following language servers
       --  Feel free to add/remove any LSPs that you want here. They will automatically be installed.
       --
@@ -673,7 +749,6 @@ require('lazy').setup({
       local servers = {
         -- clangd = {},
         -- gopls = {},
-        -- pyright = {},
         -- rust_analyzer = {},
         -- ... etc. See `:help lspconfig-all` for a list of all the pre-configured LSPs
         --
@@ -683,6 +758,9 @@ require('lazy').setup({
         -- But for many setups, the LSP (`ts_ls`) will work just fine
         -- ts_ls = {},
         --
+        ansiblels = {},
+
+        terraformls = {},
 
         lua_ls = {
           -- cmd = { ... },
@@ -698,6 +776,70 @@ require('lazy').setup({
             },
           },
         },
+
+        ruff = {
+          init_options = {
+            settings = {
+              lineLength = 100,
+              showSyntaxErrors = true,
+              lint = {
+                enable = true,
+                select = { 'E', 'F', 'I', 'UP', 'B', 'SIM', 'PL', 'RUF' },
+                -- If Ruff is your formatter, don't fight E501 (line-length)
+                ignore = { 'E501' },
+              },
+            },
+          },
+        },
+
+        pyright = {
+          settings = {
+            pyright = {
+              disableOrganizeImports = true, -- Using Ruff
+            },
+            python = {
+              analysis = {
+                typeCheckingMode = 'off', -- "off" | "basic" | "strict"
+                ignore = { '*' },
+                --                autoImportCompletions = true,
+                --                useLibraryCodeForTypes = true,
+                --                diagnosticMode = 'workspace', -- "openFilesOnly" if you want less background work
+                --                indexing = true, -- helps big repos
+                --                -- If Ruff enforces style/unused-imports, keep Pyright quieter:
+                --                diagnosticSeverityOverrides = {
+                --                  reportUnusedImport = 'none',
+                --                  reportUnusedVariable = 'none',
+                --                  reportUnusedFunction = 'none',
+                --                  reportUnusedClass = 'none',
+                --                  reportDuplicateImport = 'none',
+                --                  reportUnusedExpression = 'none',
+                --                  reportUnnecessaryCast = 'none', -- optional
+                --                  reportUnnecessaryIsInstance = 'none', -- optional
+                --                  reportPrivateUsage = 'none', -- optional if Ruff’s pydocstyle/flake8 plugins cover you
+                --                  reportPrivateImportUsage = 'none',
+                --                },
+              },
+            },
+          },
+        },
+
+        -- rust_analyzer = {},
+        yamlls = {
+          settings = {
+            yaml = {
+              validate = true,
+              hover = true,
+              completion = true,
+              format = { enable = true },
+            },
+            redhat = { telemetry = { enabled = false } },
+          },
+        },
+      }
+      ---@type MasonLspconfigSettings
+      ---@diagnostic disable-next-line: missing-fields
+      require('mason-lspconfig').setup {
+        automatic_enable = vim.tbl_keys(servers or {}),
       }
 
       -- Ensure the servers and tools above are installed
@@ -716,22 +858,20 @@ require('lazy').setup({
       local ensure_installed = vim.tbl_keys(servers or {})
       vim.list_extend(ensure_installed, {
         'stylua', -- Used to format Lua code
+        'ansible-lint',
       })
       require('mason-tool-installer').setup { ensure_installed = ensure_installed }
 
-      require('mason-lspconfig').setup {
-        ensure_installed = {}, -- explicitly set to an empty table (Kickstart populates installs via mason-tool-installer)
-        automatic_installation = false,
-        handlers = {
-          function(server_name)
-            local server = servers[server_name] or {}
-            -- This handles overriding only values explicitly passed
-            -- by the server configuration above. Useful when disabling
-            -- certain features of an LSP (for example, turning off formatting for ts_ls)
-            server.capabilities = vim.tbl_deep_extend('force', {}, capabilities, server.capabilities or {})
-            require('lspconfig')[server_name].setup(server)
-          end,
-        },
+      -- Installed LSPs are configured and enabled automatically with mason-lspconfig
+      -- The loop below is for overriding the default configuration of LSPs with the ones in the servers table
+      for server_name, config in pairs(servers) do
+        vim.lsp.config(server_name, config)
+      end
+
+      -- NOTE: Some servers may require an old setup until they are updated. For the full list refer here: https://github.com/neovim/nvim-lspconfig/issues/3705
+      -- These servers will have to be manually set up with require("lspconfig").server_name.setup{}
+      require('render-markdown').setup {
+        completions = { lsp = { enabled = true } },
       }
     end,
   },
@@ -756,7 +896,7 @@ require('lazy').setup({
         -- Disable "format_on_save lsp_fallback" for languages that don't
         -- have a well standardized coding style. You can add additional
         -- languages here or re-enable it for the disabled ones.
-        local disable_filetypes = { c = true, cpp = true }
+        local disable_filetypes = { c = true, cpp = true, python = true, yaml = true }
         if disable_filetypes[vim.bo[bufnr].filetype] then
           return nil
         else
@@ -769,8 +909,8 @@ require('lazy').setup({
       formatters_by_ft = {
         lua = { 'stylua' },
         -- Conform can also run multiple formatters sequentially
-        -- python = { "isort", "black" },
-        --
+        python = { 'ruff_fix', 'ruff_organize_imports', 'ruff_format' },
+        sh = { 'shfmt' },
         -- You can use 'stop_after_first' to run the first available formatter from the list
         -- javascript = { "prettierd", "prettier", stop_after_first = true },
       },
@@ -977,14 +1117,14 @@ require('lazy').setup({
   -- require 'kickstart.plugins.indent_line',
   -- require 'kickstart.plugins.lint',
   -- require 'kickstart.plugins.autopairs',
-  -- require 'kickstart.plugins.neo-tree',
+  require 'kickstart.plugins.neo-tree',
   -- require 'kickstart.plugins.gitsigns', -- adds gitsigns recommend keymaps
 
   -- NOTE: The import below can automatically add your own plugins, configuration, etc from `lua/custom/plugins/*.lua`
   --    This is the easiest way to modularize your config.
   --
   --  Uncomment the following line and add your plugins to `lua/custom/plugins/*.lua` to get going.
-  -- { import = 'custom.plugins' },
+  { import = 'custom.plugins' },
   --
   -- For additional information with loading, sourcing and examples see `:help lazy.nvim-🔌-plugin-spec`
   -- Or use telescope!
